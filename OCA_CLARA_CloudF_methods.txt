@@ -1,0 +1,112 @@
+OCA and CLARA daily cloud fraction: method, start to finish
+===========================================================
+Code: 2OCA_daily_sectors_pipeline.py (OCA processing), 3CLARA_OCA_CloudF_Compare.ipynb (comparison and trends)
+Date: 03/11/2026
+
+
+1. Study area and season
+------------------------
+Stored box: 5S-20N, 70W-20W (tropical North Atlantic). All zarr stores (CLARA and OCA) cover this box.
+Analysis box: 5S-20N, 60W-20W. The stores are trimmed to this box when loaded, for this test.
+Grid: CLARA-A3 0.25 deg cell centres, lat -4.875 to 19.875 (100 cells),
+      lon -69.875 to -20.125 (200 cells) in the stores, -59.875 to -20.125 (160 cells) after trimming.
+Season: May-August only.
+A 0.25 deg cell is about 28 km (latitude) by 26-28 km (longitude, depending on latitude).
+
+
+2. CLARA-A3 cloud fraction
+--------------------------
+Source: CM SAF CLARA-A3 CFC (AVHRR-based, DOI:10.5676/EUM_SAF_CM/CLARA_AVHRR/V003), CDR to 2010 and ICDR from 2011.
+Input: daily 0.25 deg cloud fraction (cfc, %) subset to the box, stored as
+       cfc_subset_1990_MJJA.zarr, cfc_subset_1991_2010.zarr and cfc_subset_2011_2026.zarr (/home/nandii/cloudf).
+       The 1990 store (May-August only) was built from the clara_cfc_dm S3 bucket with the same box subset.
+Period used: 1990-05-01 to 2026-07-28, May-August days only (4516 days).
+
+
+3. OCA cloud fraction
+---------------------
+3.1 Data access
+Source: EUMETSAT OCA CDR (Optimal Cloud Analysis, SEVIRI), collection EO:EUM:DAT:0617, Meteosat MSG1-4.
+Download: EUMETSAT Data Store via the eumdac Python API. One netCDF product per 15-minute full-disc scan.
+For each May-August day from 2004 to 2019, the hourly scans from 09:00 to 21:00 GMT are downloaded
+(up to 13 per day). Each scan is cropped to the box and binned, then the raw file is deleted.
+
+3.2 Local time window by longitude sector
+The box is split into three equal longitude sectors. Each sector uses the 11 hourly scans from 07:00 to 17:00
+local time, with local time taken at the sector centre and rounded to a whole-hour offset from GMT:
+    West    70.0-53.3W  (centre 61.7W)  GMT = local + 4 h  ->  scans 11:00-21:00 GMT
+    Centre  53.3-36.7W  (centre 45.0W)  GMT = local + 3 h  ->  scans 10:00-20:00 GMT
+    East    36.7-20.0W  (centre 28.3W)  GMT = local + 2 h  ->  scans 09:00-19:00 GMT
+Each 0.25 deg cell, and each SEVIRI pixel in it, belongs to the sector its cell centre falls in.
+
+3.3 Cloud mask
+OCA's own per-pixel cloud mask, the scene_classification variable, is used:
+    class 0        -> clear
+    classes 1-3    -> cloudy (all cloudy classes counted together)
+    class 10       -> retrieval failed, excluded
+No other OCA retrieval (cloud top pressure, optical thickness, etc.) is used.
+
+3.4 Daily cloud fraction per SEVIRI pixel
+For each pixel and day, over its sector's 11 scans:
+    cloud fraction (%) = 100 x (number of cloudy scans) / (number of valid scans)
+Valid scans are those with a class other than 10 and not missing.
+A pixel needs valid data in at least 50% of its sector's scans, otherwise it is set to missing for that day.
+
+3.5 Daily cloud fraction per 0.25 deg cell (cf_scene)
+Each SEVIRI pixel is assigned to the 0.25 deg cell its latitude/longitude falls in.
+cf_scene = mean of the pixel daily cloud fractions in the cell.
+valid_frac = fraction of the cell's SEVIRI pixels with a daily value.
+A cell needs valid_frac >= 0.5, otherwise cf_scene is set to missing.
+SEVIRI pixels are 3 km at the sub-satellite point (0N, 0E) and larger over this box. Approximate pixel size
+(E-W x N-S): ~3.3 x 3.1-3.4 km at 20W, ~5.2 x 3.3 km at 45W 7.5N, ~8.8-9.1 x 3.4-4.8 km at 60W,
+~17-18 x 3.7-7.6 km at 70W. Each 0.25 deg cell (about 28 x 26-28 km) therefore holds roughly 40-70 pixels
+in the east and fewer towards the west.
+
+3.6 Output files
+One netCDF per year (oca_sectors_025_years/OCAsec025_YYYY.nc), with variables cf_scene, valid_frac,
+n_scans (scans read that day) and platform (Meteosat satellite of the day).
+Combined into two zarr stores split at 2011:
+    OCA_sectors_ss_2004_2010.zarr  (855 days, 2004-05-01 to 2010-08-31)
+    OCA_sectors_ss_2011_2019.zarr  (1106 days, 2011-05-01 to 2019-08-31)
+Total 1961 of 1968 possible May-August days. Seven days have no OCA scans on the Data Store:
+2009-08-15 to 2009-08-20 and 2018-05-07.
+
+
+4. Box-mean time series (both datasets)
+---------------------------------------
+Same steps for CLARA (cfc) and OCA (cf_scene):
+    1. Join the pre- and post-2011 zarr stores along time.
+    2. Trim to the analysis box, 60W-20W (lon slice -60 to -20).
+    3. Mask land with the Natural Earth 1:110m land mask (regionmask, natural_earth_v5_0_0.land_110).
+    4. Keep May-August days.
+    5. Average over all ocean cells in the box (missing cells skipped) to give one daily value.
+    6. Drop days with no value.
+Weekly means: calendar weeks (pandas resample 'W', weeks ending Sunday) of the daily series.
+Monthly means: calendar months (pandas resample 'MS') of the daily series.
+Weeks and months outside May-August have no data and are dropped.
+
+
+5. Trends
+---------
+Ordinary least squares regression (scipy.stats.linregress) of cloud fraction on calendar time (days since
+the first value of the series). Reported per fit:
+    total change (percentage points) = slope x length of the series in days
+    slope per decade (pp/decade)     = slope x 3652.5
+    p-value of the slope
+Fitted separately for each dataset (CLARA, OCA), each averaging period (daily, weekly, monthly) and each block:
+    Full record   CLARA 1990-2026, OCA 2004-2019
+    Pre-2011      to 2010-08-31
+    Post-2011     from 2011-05-01
+
+
+6. Plots
+--------
+x-axis: concatenated bloom-season time (May-August periods placed end to end, one step per day, week or
+month), with year labels at the first period of every second year and a dashed line at the start of 2011.
+Trend figures: one panel per dataset, data with the full, pre-2011 and post-2011 fits. Fits are on calendar
+time and drawn on the concatenated axis, so they appear stepped.
+Comparison figures: CLARA and OCA on one panel with no trend lines, covering 1990-2026.
+Saved figures (/home/nandii/cloudML):
+    CLARA_OCA_trends_prepost2011.png,         CLARA_OCA_comparison.png           (daily)
+    CLARA_OCA_trends_prepost2011_weekly.png,  CLARA_OCA_comparison_weekly.png
+    CLARA_OCA_trends_prepost2011_monthly.png, CLARA_OCA_comparison_monthly.png
